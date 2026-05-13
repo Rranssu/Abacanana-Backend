@@ -1,112 +1,63 @@
+// script.js - Updated Watchdog (No Push, Just Firestore Logging)
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
-const rateLimit = require('express-rate-limit');
-const { Expo } = require('expo-server-sdk'); // Import Expo SDK
-
-// Import Firebase initialization
 const { db, admin } = require('./config/firebase');
 
 const app = express();
-const expo = new Expo(); // Initialize Expo
-
-// --- Production Middleware ---
-app.set('trust proxy', 1);
 app.use(helmet());
 app.use(compression());
 app.use(cors());
 app.use(express.json());
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
-  max: 100, 
-  message: "Too many requests from this IP."
-});
-app.use('/api', limiter); 
-
-// --- 1. LAB WATCHDOG LOGIC (The Monitoring System) ---
-
+// --- 🕵️ LAB WATCHDOG: THE MONITORING SYSTEM ---
 const startLabWatchdog = () => {
-  console.log("🕵️  Lab Watchdog is now monitoring sensor readings...");
+  console.log("🕵️ Watchdog active: Monitoring thresholds for Notification History...");
 
-  // Listen for the LATEST document added to the 'readings' collection
+  // Listen for the LATEST sensor reading
   db.collection('readings')
     .orderBy('timestamp', 'desc')
     .limit(1)
     .onSnapshot(async (snapshot) => {
       if (snapshot.empty) return;
 
-      const latestReading = snapshot.docs[0].data();
-      const { temp, humidity } = latestReading;
+      const { temp, humidity } = snapshot.docs[0].data();
 
       try {
-        // Fetch current thresholds and push token from config/menu
+        // Fetch thresholds from config/menu
         const configDoc = await db.collection('config').doc('menu').get();
         if (!configDoc.exists) return;
 
-        const config = configDoc.data();
-        const { 
-          pushEnabled, expoPushToken, 
-          tempMin, tempMax, humMin, humMax 
-        } = config;
+        const { tempMin, tempMax, humMin, humMax } = configDoc.data();
 
-        // Only proceed if notifications are ON and we have a valid phone token
-        if (!pushEnabled || !expoPushToken) return;
+        let alertDetail = "";
 
-        let alertMessage = "";
+        // Temperature Check
+        if (temp > tempMax) alertDetail = `High Temp: ${temp}°C (Limit: ${tempMax}°C)`;
+        else if (temp < tempMin) alertDetail = `Low Temp: ${temp}°C (Limit: ${tempMin}°C)`;
 
-        // Check Temperature Thresholds
-        if (temp > tempMax) alertMessage = `⚠️ High Temp Alert: ${temp}°C exceeds max limit of ${tempMax}°C!`;
-        else if (temp < tempMin) alertMessage = `❄️ Low Temp Alert: ${temp}°C is below min limit of ${tempMin}°C!`;
+        // Humidity Check
+        if (humidity > humMax) alertDetail = `High Humidity: ${humidity}% (Limit: ${humMax}%)`;
+        else if (humidity < humMin) alertDetail = `Low Humidity: ${humidity}% (Limit: ${humMin}%)`;
 
-        // Check Humidity Thresholds (if no temp alert, check humidity)
-        if (!alertMessage) {
-            if (humidity > humMax) alertMessage = `💧 High Humidity: ${humidity}% exceeds limit of ${humMax}%!`;
-            else if (humidity < humMin) alertMessage = `🌵 Low Humidity: ${humidity}% is below limit of ${humMin}%!`;
+        // IF THRESHOLD IS BROKEN: Create a new document in 'notifications'
+        if (alertDetail) {
+          console.log(`⚠️ Threshold Breach! Logging: ${alertDetail}`);
+          
+          await db.collection('notifications').add({
+            title: "Lab Alert",
+            detail: alertDetail,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+          });
         }
-
-        if (alertMessage) {
-          await sendPushNotification(expoPushToken, alertMessage);
-          await logNotification(alertMessage);
-        }
-
       } catch (error) {
-        console.error("Watchdog Logic Error:", error);
+        console.error("Watchdog Error:", error);
       }
     });
 };
 
-// Helper: Send to Expo Servers
-const sendPushNotification = async (token, message) => {
-  if (!Expo.isExpoPushToken(token)) return;
-
-  const messages = [{
-    to: token,
-    sound: 'default',
-    title: '🌿 Abacanana Lab Alert',
-    body: message,
-    data: { withData: 'arg' },
-  }];
-
-  try {
-    await expo.sendPushNotificationsAsync(messages);
-    console.log(`🚀 Notification sent: ${message}`);
-  } catch (error) {
-    console.error("Expo Push Error:", error);
-  }
-};
-
-// Helper: Save alert to Notification History in App
-const logNotification = async (message) => {
-  await db.collection('notifications').add({
-    title: "Threshold Breach",
-    detail: message,
-    timestamp: admin.firestore.FieldValue.serverTimestamp()
-  });
-};
-
-// --- 2. API Route Mounting ---
+// --- ROUTES ---
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
@@ -116,11 +67,8 @@ app.use('/api', dashboardRoutes);
 app.use('/api', notificationRoutes);
 app.use('/api', settingsRoutes);
 
-// --- 3. START SERVER & WATCHDOG ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  
-  // Start the background monitoring
   startLabWatchdog();
 });
